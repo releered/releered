@@ -1,0 +1,651 @@
+---
+title: "Predicting Capital Bikeshare User-type, October 2024"
+author: "[Anusha Umashankar](https://github.com/Anusha-raju)| [Aidan Carlisle](https://github.com/acarlisle8)| [Rachel Thomas](https://github.com/releered)| [Sayan Patra](https://github.com/Sayanpatraa) - Group 8 "
+# date: "today"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    number_sections: false
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+<style>
+
+h1 { color: #800000; }  
+
+h2 { color: #000080; } 
+h3 { color: #004d4d; } 
+
+</style>
+
+```{r init, include=F}
+# The package "ezids" (EZ Intro to Data Science) includes a lot of the helper functions we developed for the course. 
+# Some of the frequently used functions are loadPkg(), xkabledply(), xkablesummary(), uzscale(), etc.
+# Once installed, load the library.
+library(ezids)
+```
+
+```{r setup, include=FALSE}
+# some of common options (and the defaults) are: 
+# include=T, eval=T, echo=T, results='hide'/'asis'/'markup',..., collapse=F, warning=T, message=T, error=T, cache=T, fig.width=6, fig.height=4, fig.dim=c(6,4) #inches, fig.align='left'/'center','right', 
+knitr::opts_chunk$set(warning = F, results = "markup", message = F)
+options(scientific=T, digits = 3) 
+```
+
+```{r include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(geosphere)
+library(tidygeocoder)
+library(caret)
+library(lattice)
+library(lubridate)
+library(rattle)
+library(rpart)
+library(rpart.plot)
+library(car)
+library(pROC)
+library(rattle)
+library(caret) 
+library(pscl)
+```
+
+# Introduction: 
+
+*Capital Bikeshare* is a bicycle-sharing system that serves Washington, D.C., and certain counties of the larger metropolitan area in both Maryland and Virginia. Users can select from electric or classic bikes at over 700 locations, either as a casual rider or with a monthly membership. The dataset is of October 2024.
+
+# Literature Review
+
+The earliest well-known community bicycle started in 1965 in Amsterdam, Netherlands. Since then cities of all sizes and around the world have introduced programs. Bike-sharing is a way to solve the "last mile" problem of public transit networks, providing a bridge between people's homes and public transit hub ("Bicycle-sharing systems", 2024). In 2008, Washington, DC became the first city in North America to launch a bike-sharing system, called SmartBike DC. Within a couple years, Arlington, VA, Alexandria, VA, and Montgomery County, MD collaborated with DC to form Capital Bikeshare in 2010 (Capital Bikeshare,2022).
+
+Since it's inception, extensive research has been done on bike-sharing, and on Capital Bikeshare specifically. In 2024, Sadeghvarziri et. al. analyzed the influential factors and dynamics of bikeshare utilization in DC. This study included more than 3 million ride obvervations, and concluded temporal trends highlighted peak mid-weekday ridership, aligning with daily work commutes, and that docked bikes are favored on weekdays, electric bikes on weekends, and members are less likely to choose classic bikes. (Sadeghvaziri et. al., 2024). This valuable information can be used to make data-driven decisions about the program. 
+
+Additionally, bikesharing in DC plays an integral role in transit accessibility in DC. In 2024, Tushar & Buehler (2024), found more bike trails, bike lanes, and metrorail stations within one mile of neighborhood docking stations and shorter distances between neighborhood docking stations are associated with more bikeshare trips. This reinforces the importance of infrastructure with respect to attracting bikeshare users (Tushar & Buehler 2024). 
+
+```{r}
+file_path <- file.path(getwd(), "202410-capitalbikeshare-tripdata.csv")
+capital_bikeshare <- read.csv(file_path, header = TRUE)
+```
+
+The dataset contains the following attributes.
+```{r}
+colnames(capital_bikeshare)
+```
+
+# Preprocessing:
+
+We began this project by evaluating the dataset for completeness and modified variables for usability. 
+
+1. There are data points where information like start_station_name & id , end_station_name & id , and end_lat and end_lng are missing. 
+`r colSums(is.na(capital_bikeshare))`.
+
+Dropping the `r colSums(is.na(capital_bikeshare))["end_lat"]` rows as they constitute only `r colSums(is.na(capital_bikeshare))["end_lat"]/nrow(capital_bikeshare)*100` percent of the dataset. 
+
+```{r}
+capital_bikeshare <- capital_bikeshare %>%
+  filter(!is.na(end_lat))
+```
+2. `Distance (in miles)` is derived using the latitude and longitude coordinates of the start and end points. The `distVincentySphere()` function from the `geosphere` package in R is used to compute the geodesic distance, factoring in the Earth's curvature.
+
+```{r}
+# Calculate the distance for each row and add it as a new column (in miles)
+capital_bikeshare$distance_miles <- mapply(function(lat1, lon1, lat2, lon2) {
+  distVincentySphere(c(lon1, lat1), c(lon2, lat2)) / 1000 * 0.621371  
+}, capital_bikeshare$start_lat, capital_bikeshare$start_lng, capital_bikeshare$end_lat, capital_bikeshare$end_lng)
+```
+3. Calculated the total ride time by subtracting `started_at` from `ended_at.`
+```{r}
+capital_bikeshare$started_at <- as.POSIXct(capital_bikeshare$started_at, format="%Y-%m-%d %H:%M:%OS")
+capital_bikeshare$ended_at <- as.POSIXct(capital_bikeshare$ended_at, format="%Y-%m-%d %H:%M:%OS")
+capital_bikeshare$ride_duration_mins <- as.numeric(difftime(capital_bikeshare$ended_at, capital_bikeshare$started_at, units = "mins"))
+```
+4. Categorizing Rides by Time Period.
+```{r}
+get_time_period <- function(time) {
+  hour <- as.numeric(format(time, "%H"))
+  
+  if (hour >= 4 & hour < 6) {
+    return("Early Morning")
+  } else if (hour >= 6 & hour < 9) {
+    return("Morning")
+  } else if (hour >= 9 & hour < 12) {
+    return("Mid-Morning")
+  } else if (hour >= 12 & hour < 13) {
+    return("Midday")
+  } else if (hour >= 13 & hour < 17) {
+    return("Afternoon")
+  } else if (hour >= 17 & hour < 19) {
+    return("Evening")
+  } else if (hour >= 19 & hour < 21) {
+    return("Late Evening")
+  } else {
+    return("Night")
+  }
+}
+
+
+capital_bikeshare <- capital_bikeshare %>%
+  mutate(
+    start_time_period = sapply(started_at, get_time_period),
+  )
+```
+5. Categorizing rides by weekday vs weekend
+```{r}
+capital_bikeshare$day_type <- ifelse(wday(capital_bikeshare$started_at) %in% c(1, 7), "weekend", "weekday")
+
+```
+
+
+**The following attributes are considered for further Exploratory Data Analysis (EDA):**
+
+```{r}
+filtered_capital_bikeshare <- capital_bikeshare %>% select(rideable_type,member_casual,distance_miles,ride_duration_mins, start_time_period,day_type)
+```
+
+*Factorizing 'rideable_type', 'member_casual', 'start_time_period', and 'day_type' variables:*
+```{r}
+filtered_capital_bikeshare$rideable_type <- as.factor(filtered_capital_bikeshare$rideable_type) 
+filtered_capital_bikeshare$member_casual <- as.factor(filtered_capital_bikeshare$member_casual)
+filtered_capital_bikeshare$start_time_period <- as.factor(filtered_capital_bikeshare$start_time_period)
+filtered_capital_bikeshare$day_type <- as.factor(filtered_capital_bikeshare$day_type)
+```
+
+*Removing outliers*
+```{r}
+#for distance_miles
+z_scores_DM <- scale(filtered_capital_bikeshare$distance_miles)
+outliers <- which(abs(z_scores_DM) > 3)
+capital_bikeshare_clean <- filtered_capital_bikeshare[-outliers, ]
+
+# for ride_duration_mins
+z_scores_RDM <- scale(capital_bikeshare_clean$ride_duration_mins)
+outliers <- which(abs(z_scores_RDM) > 2)
+capital_bikeshare_clean <- capital_bikeshare_clean[-outliers, ]
+
+```
+
+After cleaning the dataset the number of rows are `r nrow(capital_bikeshare_clean)`.
+
+The features considered for analysis are as follows:
+
+`rideable_type`: This refers to the type of bike or vehicle used for the ride, such as electric bikes or classic bike.
+
+`member_casual`: This variable categorizes users based on their membership status. "Member" refers to users who have a subscription or membership, while "Casual" refers to users who use the service on an ad-hoc, non-subscription basis.
+
+`distance_miles`: This represents the distance traveled during the ride, measured in miles. It quantifies how far the rider has traveled using the bike-sharing service.
+
+`ride_duration_mins`: This variable refers to the total time, in minutes, that the ride lasts. It measures how long the bike or vehicle is used during each ride.
+
+`start_time_period`: This represents the time of day during which the ride starts, such as morning, afternoon, or evening. It helps to analyze patterns based on the time of use.
+
+`day_type`: This variable refers to the type of day, such as weekdays (Monday to Friday) or weekends (Saturday-Sunday). This is useful for understanding usage patterns depending on the type of day.
+
+# Exploratory Data Analysis
+This project aims to predict user type (member versus casual) based on trip characteristics. Our exploratory data analysis focused first on understanding the fundamental shape of the dataset's variables, and then on the relationship between the features and the predictor (member_casual). We used this information both to guide how we added features to the models, as well as to bolster the resultant findings from the models. 
+
+## Frequency of electric bike versus classic bike rentals
+```{r}
+
+bike_type_counts <- table(capital_bikeshare_clean$rideable_type)
+bike_type_df <- as.data.frame(bike_type_counts)
+
+ggplot(bike_type_df, aes(x = Var1, y = Freq, fill = Var1)) + 
+  geom_bar(stat = "identity") + 
+  labs(title = "Frequency of Electric Bike vs Classic Bike Rentals",
+       x = "Bike Type",
+       y = "Frequency of Rentals") + 
+  scale_fill_manual(values = c("electric_bike" = "blue", "classic_bike" = "green")) +  
+  scale_y_continuous(labels = scales::comma)+
+  theme(legend.position = "none")
+```
+
+There is a higher frequency of electric bike rentals compared to classic bikes in the dataset indicates a preference for electric bikes. 
+
+## Distribution of duration rides on electric bike versus classic bike
+
+*Histogram*
+```{r}
+ggplot(capital_bikeshare_clean, aes(x = ride_duration_mins, fill = rideable_type)) +
+  geom_histogram(binwidth = 2, color = "black", alpha = 0.7, position = "dodge") +
+  labs(
+    title = "Distribution of Ride Duration by Bike Type",
+    x = "Ride Duration (Minutes)",
+    y = "Frequency"
+  ) +
+  scale_fill_manual(values = c("electric_bike" = "green", "classic_bike" = "blue")) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+*Box plot*
+```{r}
+ggplot(capital_bikeshare_clean, aes(x = rideable_type, y = ride_duration_mins, fill = rideable_type)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of Ride Durations for Electric vs Classic Bikes",
+       x = "Bike Type",
+       y = "Ride Duration (minutes)") +
+  scale_fill_manual(values = c("electric_bike" = "blue", "classic_bike" = "green")) +
+  theme_minimal()
+```
+
+The distribution of ride duration by bike type is right-skewed, and the box plot highlights a significant number of extreme outliers.
+
+
+## Distribution of distances ride by bike type. 
+
+*Histogram*
+```{r}
+ggplot(capital_bikeshare_clean, aes(x = distance_miles, fill = rideable_type)) +
+  geom_histogram(binwidth = 0.3, color = "black", alpha = 0.7, position = "dodge") +
+  labs(
+    title = "Distribution of Ride Distance by Bike Type",
+    x = "Ride Distance (miles)",
+    y = "Frequency"
+  ) +
+  scale_fill_manual(values = c("electric_bike" = "blue", "classic_bike" = "green")) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+*Box-plot*
+```{r}
+ggplot(capital_bikeshare_clean, aes(x = rideable_type, y = distance_miles, fill = rideable_type)) +
+  geom_boxplot() +
+  labs(
+    title = "Box Plot of Ride Distance by Bike Type",
+    x = "Rideable Type",
+    y = "Distance (miles)"
+  ) +
+  scale_fill_manual(values = c("electric_bike" = "blue", "classic_bike" = "green")) + 
+  theme_minimal()
+```
+
+
+The distribution of ride distance by bike type is slightly more right-skewed for classic bikes compared to electric bikes, with electric bikes exhibiting a wider distribution than classic bikes.
+
+
+## Frequency of user types
+
+
+```{r}
+user_type_counts <- table(capital_bikeshare_clean$member_casual)
+user_type_df <- as.data.frame(user_type_counts)
+```
+
+
+
+*Pie chart:*
+```{r}
+user_type_df <- user_type_df %>%
+  mutate(percentage = round(Freq / sum(Freq) * 100, 1))
+ggplot(user_type_df, aes(x = "", y = Freq, fill = Var1)) + 
+  geom_bar(stat = "identity", width = 1) + 
+  coord_polar(theta = "y") + 
+  labs(title = "Proportion of User Types (Member vs Casual)") +
+  scale_fill_manual(values = c("member" = "blue", "casual" = "green")) +
+  theme_void() +
+  geom_text(aes(label = paste(Var1, "\n", percentage, "%")), position = position_stack(vjust = 0.5)) + 
+  theme(legend.position = "none")
+```
+
+There is a higher percentage of member-type riders in October.
+
+
+
+## User Types by Rideable Type
+
+```{r}
+user_bike_counts <- capital_bikeshare_clean %>%
+  group_by(member_casual, rideable_type) %>%
+  summarise(Freq = n())  
+
+ggplot(user_bike_counts, aes(x = rideable_type, y = Freq, fill = member_casual)) +
+  geom_bar(stat = "identity", position = "dodge") +  
+  labs(title = "User Type Distribution by Rideable Type",
+       x = "Rideable Type (Bike Type)",
+       y = "Frequency of Rides") +
+  scale_fill_manual(values = c("member" = "blue", "casual" = "green")) +  
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+```
+
+
+Electric bikes have a higher proportion of member-type riders compared to casual-type riders.
+
+
+## Ride characteristics on weekdays vs weekends
+```{r}
+ggplot(capital_bikeshare_clean, aes(x = day_type, fill = interaction(member_casual, rideable_type))) +
+  geom_bar(position = "dodge") + 
+  labs(title = "Ride characteristics on weekdays vs weekends",
+       x = "Day Type",
+       y = "Count",
+       fill = "Member Type & Rideable Type") +
+  theme_minimal()
+```
+- Overall, there are fewer rides on weekends, with a significant decrease in rides by member-type users during the weekend.
+
+
+The exploratory data analysis of the Capital Bikeshare dataset for October 2024 provides clear distinctions between the usage patterns of members and casual users, highlighting their differing motivations and behaviors. Members, who represent the majority of rides, exhibit consistent weekday activity, particularly during peak commuting hours. This behavior aligns with practical and routine travel needs, such as commuting or regular errands. In contrast, casual users are more active on weekends and prefer shorter trips, suggesting their primary use is leisure-oriented.
+
+A key finding is the strong preference for electric bikes, particularly among casual users, who likely value the ease and accessibility they provide for infrequent trips. Ride duration and distance also serve as critical differentiators: members tend to take longer rides over greater distances, whereas casual users favor shorter rides. Temporal patterns further underscore the importance of time and day in shaping user behavior. Members dominate weekday rides, while casual users significantly increase their activity on weekends and evenings. 
+
+
+
+# Predict the rider's class based on trip characteristics
+
+Our goal was to use trip characteristics to predict whether users are members or casual. This is a binary classification problem, so we utilized models suited to this type of problem: decision tree and logistic regression. 
+
+# Decision Tree
+
+```{r}
+# K-fold cross-validation
+set.seed(123)
+fold <- floor(runif(nrow(capital_bikeshare_clean), 1, 6)) 
+capital_bikeshare_clean$fold <- fold
+
+#vector to store results
+accuracy_results <- c()
+
+# Loop through each fold
+for (i in 1:5) {
+  # Create the test and training sets
+  test.set <- capital_bikeshare_clean[capital_bikeshare_clean$fold == i,] 
+  train.set <- capital_bikeshare_clean[capital_bikeshare_clean$fold != i,]
+  
+  # Train the decision tree model
+  Member_casual_tree <- rpart(member_casual ~ rideable_type + distance_miles + ride_duration_mins + start_time_period + day_type, 
+                              data = train.set, 
+                              method = "class")
+  
+  # Visualize the tree
+  #rpart.plot(Member_casual_tree, type = 3, extra = 1, main = "Classification Tree for Member vs Casual Prediction")
+  
+  # summary of the tree
+  printcp(Member_casual_tree)
+  
+  # predictions on the test set
+  pred_prob <- predict(Member_casual_tree, test.set, type = "prob")
+  
+  # probabilities to predicted classes (1 for 'Member', 2 for 'Casual')
+  pred_class <- ifelse(pred_prob[, 2] > 0.5, "casual", "member")  # Assuming 2nd class (casual) is the positive class
+  
+  #  accuracy of the current fold
+  accuracy <- sum(pred_class == test.set$member_casual) / nrow(test.set)
+  accuracy_results[i] <- accuracy
+}
+
+# average accuracy across all folds
+mean_accuracy <- mean(accuracy_results)
+print(paste("Average accuracy across all folds: ", round(mean_accuracy, 4)))
+
+```
+
+This analysis focuses on building a decision tree model to explore how features like rideable type, distance, ride duration, time of day, and day type influence the classification of bike riders as either "Member" or "Casual." The methodology below outlines the steps for training, evaluating, and visualizing the model using K-fold cross-validation.
+
+
+We assign each observation a fold number ranging from 1 to 5. This division allows each fold to act as a test set in turn while the rest of the data is used for training.
+
+*Decision Tree Model Training*
+We use the `rpart` package in R to build a decision tree classifier. The target variable, member_casual, is predicted based on features - `rideable_type`, `distance_miles`, `ride_duration_mins`, `start_time_period`, `day_type`.
+
+For each fold, the decision tree model is trained on the training dataset using the rpart function, with the method specified as "class" since it is a classification problem. The model is then summarized to obtain key information about the tree's structure.
+
+*Model Evaluation*
+After training the model on the training set, predictions are made on the test set. The predicted probabilities for each class ("Member" or "Casual") are generated using the predict function. The predicted class is then determined by comparing the probabilities to a threshold of 0.5 (i.e., if the probability of being "Casual" exceeds 0.5, the prediction is classified as "Casual"; otherwise, it is classified as "Member").
+
+The accuracy for each fold is calculated by comparing the predicted class labels to the true labels in the test set. These accuracies are stored in the `accuracy_results` vector.
+
+*Accuracy Calculation*
+After completing all five folds, the average accuracy across all folds is calculated. This average provides a more robust evaluation of the model's performance, as it considers the variation across different subsets of the data.
+```{r}
+# final tree visualization
+rpart.plot(Member_casual_tree, type = 3, extra = 1, main = "Final Classification Tree")
+```
+
+*Final Decision Tree Visualization*
+After completing the cross-validation process, a final decision tree is trained using the entire dataset. This final model is visualized using the rpart.plot function to present a clear representation of the decision tree, showing how different features contribute to the classification of bike riders.
+
+#### Key insights:
+1] After running the classification tree, we found that the two most important variables in predicting whether a rider is a member or casual were ride duration and rideable type. This suggests that the length of the ride and the type of bike used are key differentiators between the two groups. For example, members might use bikes for longer commutes, while casual riders could tend to make shorter trips. Similarly, the type of bike may indicate a preference for certain users, with members possibly opting for more electric bikes.
+
+2] The root node error (the initial error before any splits) was 0.3% for each fold, which provides an initial baseline for the classification accuracy.
+The cross-validation error, indicated as xerror, remained consistently low across different subsets of the data, fluctuating by 0.002 in standard deviation.
+
+
+3] The average accuracy across all the folds came out to be around 31.13%.While this is a modest result, this decision tree model provides valuable insights into how trip characteristics influence whether a rider is a member or a casual user. Another interesting limitation of this tree is that the number of splits is 3. This reflects that there is an imbalance between members and casual riders in the dataset, the tree might favor the majority class and not make many splits, as there’s less incentive to separate the minority class.
+
+
+# Logistical Regression Model
+Model selection started with duration (ride_duration_mins) only and then added bike type (rideable_type) because the decision tree indicated these were the most important variables. Because this dataset does not have many variables, and nearly all are statistically significant in the full model, we elected a stepwise approach to model building, and used ANOVA to compare model quality.
+
+```{r, echo=TRUE, include=FALSE}
+riderLogit01 <- glm(member_casual ~ ride_duration_mins, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit01)
+
+riderLogit02 <- glm(member_casual ~ rideable_type + ride_duration_mins, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit02)
+
+riderLogit03 <- glm(member_casual ~ rideable_type + ride_duration_mins + day_type, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit03)
+
+riderLogit04 <- glm(member_casual ~ rideable_type + distance_miles + ride_duration_mins + day_type, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit04)
+
+riderLogit05 <- glm(member_casual ~ rideable_type * ride_duration_mins, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit05)
+
+riderLogit06 <- glm(member_casual ~ rideable_type * ride_duration_mins * day_type, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit06)
+
+riderLogit07 <- glm(member_casual ~ rideable_type * distance_miles * ride_duration_mins * day_type, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit07)
+
+riderLogit08 <- glm(member_casual ~ rideable_type * distance_miles * ride_duration_mins * day_type * start_time_period, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit08)
+
+riderLogit09 <- glm(member_casual ~ rideable_type + distance_miles + ride_duration_mins + start_time_period + day_type, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit09)
+
+riderLogit10 <- glm(member_casual ~ rideable_type * ride_duration_mins + distance_miles + start_time_period + day_type, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit10)
+
+riderLogit11 <- glm(member_casual ~ distance_miles + rideable_type * ride_duration_mins + day_type, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit11)
+```
+
+
+We then ran a series of ANOVA tests to compare models and select the best.
+```{r, echo=TRUE, include=FALSE}
+anova_result <- anova(riderLogit01, riderLogit02, riderLogit03, riderLogit04, riderLogit05, riderLogit06, riderLogit07, riderLogit08, riderLogit09, test = "Chisq")
+print(anova_result)
+
+anova_result <- anova(riderLogit04, riderLogit09, test = "Chisq")
+print(anova_result)
+
+anova_result <- anova(riderLogit09, riderLogit10, test = "Chisq")
+print(anova_result)
+
+anova_result <- anova(riderLogit04, riderLogit11, test = "Chisq")
+print(anova_result)
+
+anova_result <- anova(riderLogit11, riderLogit10, test = "Chisq")
+print(anova_result)
+
+anova_result <- anova(riderLogit04, riderLogit10, test = "Chisq")
+print(anova_result)
+```
+
+We also checked the Variance Inflation Factor to ensure there was no multicollinearity.
+```{r}
+vif(riderLogit10)
+```
+
+*Model Selection*
+Initially Models 4 and 6 had the best reduction in residual deviance for minimal change in degrees of freedom that was statistically significant. However the VIF for model 6 indicated a significant amount of multicollinearity. So then we compared model 4 to the full model (9), which showed a smaller but still statistically significant reduction to residual deviance. However this model increased the complexity by 7 degrees of freedom. We tried 2 other versions of the model, incorporating the interaction terms between duration and bike type, but with and without the time-of-day (start_time_period). Model10(riderLogit10) including all variables and the interaction between duration and bike type is a better fit when compared via ANOVA to the model without time-of-day, with a statistically significant reduction in residual deviance.
+
+
+```{r}
+riderLogit10 <- glm(member_casual ~ rideable_type * ride_duration_mins + distance_miles + start_time_period + day_type, data = capital_bikeshare_clean, family = "binomial")
+summary(riderLogit10)
+```
+
+*Logistic Regression Results*
+The intercept is log-odds 1.52, the log-odds of being a member when the bike is a classic, ride duration and distance are 0, it is the afternoon, and it is a weekday.
+
+Electric bike (versus classic bike) reduces the log-odds of being a member by log-odds 0.631.
+
+Each additional minute of ride duration decrease the log-odds of being a member by 0.062.
+
+Each additional mile of distance ridden increases the log-odds of being a member b 0.12.
+
+Evening, Late evening, Mid-morning, Morning increase the log-odds of being a member compared to afternoon. 
+
+Early morning, midday, and Night are not statistically significant at alpha = 0.05.
+
+Weekend rides reduce the likelihood of being a member by log-odds 0.42.
+The interaction term indicates that for each additional minute of ride duration on an electric bike, the negative effect of ride duration (see above) on the log-odds of being a member is reduced by 0.04. This means longer rides on electric bikes are less strongly associated with with casual riders on classic bikes.
+
+
+
+```{r}
+exp(coef(riderLogit10))
+```
+
+*Odds Ratio Interpretation*
+When the log-odds are exponentiated, we can use the odds ratios (OR) to better understand the impact of the variables.
+
+The intercept is 4.559 meaning the odds of being a member are 4.56 times higher than being a casual user when the bike is a classic, it is a weekday afternoon, and ride duration and distance are 0.
+
+The odds ratio for electric bike is 0.541, meaning riders on electric bikes are 46% (1-0.541) less likely to be members compared to classic bikes.
+
+The odds ratio for duraiton is 0.94, meaning each additional minute of ride duration decreases the odds of being a member by 6% (1-0.94).
+
+The odds ratio for distance is 1.127, meaning each additional mile of distance increases the odds of being a member by 13%.
+
+The odds ratio for morning rides is 1.499, meaning meaning morning rides are 50% more likely to be a member than afternoon rides.
+
+The odds ratio for mid-morning is 1.080, meaning odds of being a member is 8% higher than in the afternoon. 
+
+The odds ratio for evening is 1.098, meaning the odds of being a member is 9.8% higher than in the afternoon.
+
+The odds ratio for late evening is 1.10, meaning the odds of being a memberis 10% higher than in the afternoon.
+
+The odds ratio for weekend rides is 0.568, meaning riders on weekends are 34% (1-0.658) less likely to be members.
+
+The odds ratio for the interaction between bike type and duration is 1.041, meaning each additional minute of ride time on electric bikes increases the odds of being a memebr by 4.1%, which counteracts the negative effect of longer rides overall.
+
+
+#Fit and Accuracy Testing
+```{r}
+null_deviance <- 888015
+residual_deviance <- 847441
+delta_df <- 703942 - 703930
+
+delta_D <- null_deviance - residual_deviance
+
+p_value <- pchisq(delta_D, df = delta_df, lower.tail = FALSE)
+
+cat("Change in deviance:", delta_D, "\nDegrees of freedom:", delta_df, "\nP-value:", p_value, "\n")
+```
+
+*Deviance Test*
+A Deviance Test was performed to assess model fit. 
+
+H0: The null model is better than the model with predictors
+H1: The model will predictors is better/improves model fit.
+
+This model shows a substantial reduction in deviance (40574) for 12 degrees of freedom with a p-value essentially equal to zero. We reject H0 and conclude the model with predictors fits the data significantly better than the null model.
+
+
+```{r}
+predicted_probs <- predict(riderLogit10, type = "response")
+
+predicted_classes <- ifelse(predicted_probs > 0.5, "member", "casual")
+predicted_classes <- factor(predicted_classes, levels = c("member", "casual"))
+actual_classes <- factor(capital_bikeshare_clean$member_casual, levels = c("member", "casual"))
+
+conf_matrix <- confusionMatrix(predicted_classes, actual_classes)
+
+print(conf_matrix)
+
+accuracy <- conf_matrix$overall["Accuracy"]
+print(paste("Accuracy:", round(accuracy, 4)))
+```
+
+*Confusion Matrix and Accuracy Tests*
+This model is approximately 70% accurate, which is less than the 80% target but decent considering the data for this month is moderately skewed toward members. The No Information Rate (NIR) is 0.675 or 67.5%, which is the accuracy of a naive model always predicting the majority class - this model is statistically significantly better than the NIR. However the Kappa is low, suggesting limited improvement over guessing and Mcnemar's test indicates the model misclassifies disporportionately.Not surprisingly, this model is very sensitive (very good at identifying members), but not very specific (not good at identifying casual riders).
+
+
+```{r}
+predicted_probs <- predict(riderLogit10, type = "response")
+
+predicted_classes <- ifelse(predicted_probs > 0.61, "member", "casual")
+predicted_classes <- factor(predicted_classes, levels = c("member", "casual"))
+actual_classes <- factor(capital_bikeshare_clean$member_casual, levels = c("member", "casual"))
+
+conf_matrix <- confusionMatrix(predicted_classes, actual_classes)
+
+print(conf_matrix)
+
+accuracy <- conf_matrix$overall["Accuracy"]
+print(paste("Accuracy:", round(accuracy, 4)))
+
+```
+
+*Confusion Matrix and Accuracy Test with Increased Cutoff*
+To improve sensitivity and specificity, we changed the cutoff to 0.61 (increased from 0.5). This reduced the sensitivity from 0.965 to 0.866, increased the specificity from 0.128 to 0.290, and only minimally reduced the accuracy from 0.693 to 0.679. At the 0.61 cutoff, this model is still statistically better than the NIR; at 0.62 it is not, so 0.61 is the likely the best cutoff. 
+
+
+```{r}
+predicted_probs10 <- predict(riderLogit10, newdata = capital_bikeshare_clean, type = "response")
+roc_curve10 <- roc(response = capital_bikeshare_clean$member_casual, predicted_probs10, levels = c("casual", "member"))
+plot(roc_curve10, main = "ROC Curve for Logistic Regression Model", col = "blue", lwd = 2)
+
+auc_value10 <- auc(roc_curve10)
+print(paste("AUC (ModelMetrics):", round(auc_value10, 4)))
+
+```
+
+*Reciever Operating Characteristic (ROC) Curve and Area Under the Curve (AUC)*
+The AUC of the model is 0.6337 which is certainly below the target of 0.8, but still better than the null model.
+
+
+```{r, echo=TRUE}
+riderLogit10pr2 = pR2(riderLogit10)
+riderLogit10pr2
+```
+
+*Measures of Pseudo R-square including McFadden's*
+The McFadden's R-square is 0.0457 or (4.57%), which indicates this model explains a small but meaningful portion of variation in outcome compared to the null model. 
+
+
+# Conclusions
+
+Riders are overall more likely to be members. Electric bikes and longer rides reduce the odds, though less so if the longer ride is on an electric bike. Longer distances increase the odds of membership, while weekends reduce the odds. Morning rides strongly increase the odds of membership.
+
+While the decision tree was not highly accurate for predicting member type (~31%), the logistic regression model was approximately 70% accurate.This is a reasonable result given the small number of variables given. 
+
+Additionally, this dataset is a small snapshot of users and may not accurately reflect the true distribution of users over the course of the year. In order to accommodate the imbalance in the classes, we could create a subset sample that oversamples the casual riders (the minority class) and undersamples the member riders (the majority class), to create a balanced sample for the the analysis. However we did not feel the imbalance was so extreme that this would be necessary. Additionally, we suspect that if an entire year were sampled, the classes may be more balanced. The results of the study by Sadeghvazi et al. (2024) were likely different, and even opposite, from ours because they examined data from an entire year of usage. 
+
+There are many additional factors that likely affect class distribution and bike usage including time of year/season, weather, sunset times. Capital Bikeshare usage is also likely affected by geospatial factors like distance between home and a docking station, and distance to other forms of public transit. Finally, socioeconomic factors also likely have a significant impact. Future research might examine an integration of these variables into the current model for more accurate outcomes.
+
+
+
+
+
+# References
+
+Bicycle-sharing systems. (2024, November 7).
+  In *Wikipedia*. https://en.wikipedia.org/wiki/Bicycle-sharing_system
+
+*About Company & History*. (n.d). Capital Bikeshare. Retrieved December 13, 2024,   from https://ride.capitalbikeshare.com/about
+
+Sadeghvaziri, E., Javid, R., Constantin, N. (2024). Analyzing the Influential       Factors and Dynamics of Bikeshare Utilization in Washington, DC.                  *International Conference on Transportation and Development*.                     https://doi.org/10.1061/9780784485521.028
+
+Tushar, M.D., & Buehler, R. (2024). Bikeshare–Metrorail Integration in Washington,    D.C.: What are the Characteristics of Neighborhoods that Encourage Capital        Bikeshare Trips to and from the Metrorail? *Journal of the Transportation         Research Board, 2678*(10). https://doi.org/10.1177/03611981241233275
+
+
